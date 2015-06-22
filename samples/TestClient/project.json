@@ -1,25 +1,17 @@
 {
+  "commands": {
+    "run": "run"
+  },
   "dependencies": {
     "Microsoft.Net.Http.Client": "1.0.0-*"
   },
   "frameworks": {
-    "net45": {
-      "frameworkAssemblies": {
-        "System.Net.Http": ""
-      }
-    },
-    "dnx451": {
-      "frameworkAssemblies": {
-        "System.Net.Http": ""
-      }
-    },
+    "net45": { },
+    "dnx451": { },
     "dnxcore50": {
       "dependencies": {
-        "System.Console": "4.0.0-beta-*",
-        "System.Net.Http": "4.0.0-beta-*",
-        "System.Runtime": "4.0.20-beta-*"
+        "System.Console": "4.0.0-beta-*"
       }
     }
-  },
-  "webroot": null
+  }
 }

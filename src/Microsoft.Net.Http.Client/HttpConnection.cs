@@ -158,6 +158,7 @@ namespace Microsoft.Net.Http.Client
             }
             else
             {
+                // Connections that will be closed no longer count against the group's connection limit.
                 Group.RemoveConnection();
                 Group = null;
             }
@@ -187,10 +188,19 @@ namespace Microsoft.Net.Http.Client
         // or close it.
         public void ReleaseConnection()
         {
+            // TODO: Prevent this from running multiple times.
+
             // TODO: Drain?
-            // TODO: Close?
-            // TODO: Return to group?
-            Dispose();
+            if (Group != null)
+            {
+                // TODO: Return to group?
+                Group.ReturnConnection(this);
+            }
+            else
+            {
+                // TODO: Close?
+                Dispose();
+            }
         }
 
         public void Dispose()

@@ -5,6 +5,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
 
 namespace Microsoft.Net.Http.Client
 {
@@ -16,6 +17,9 @@ namespace Microsoft.Net.Http.Client
         private ProxyMode _proxyMode;
         private int _maxConnections;
         private SemaphoreSlim _maxConnectionCount;
+        // Use a stack to favor recently used connections. If we have more connections than we need let some go idle and get cleaned up.
+        // TODO: Idle connection cleanup.
+        private ConcurrentStack<HttpConnection> _availableConnections;
 
         public ConnectionGroup(Key key, ProxyMode proxyMode, int maxConnections)
         {
@@ -25,6 +29,7 @@ namespace Microsoft.Net.Http.Client
             _proxyMode = proxyMode;
             _maxConnections = maxConnections;
             _maxConnectionCount = new SemaphoreSlim(_maxConnections, _maxConnections);
+            _availableConnections = new ConcurrentStack<HttpConnection>();
         }
 
         public class Key
@@ -74,6 +79,13 @@ namespace Microsoft.Net.Http.Client
         {
             await _maxConnectionCount.WaitAsync(cancellationToken);
 
+            HttpConnection connection;
+            if (_availableConnections.TryPop(out connection))
+            {
+                // TODO: Detect and clean up idle connections
+                return connection;
+            }
+
             var transport = await ConnectAsync(cancellationToken);
 
             if (_proxyMode == ProxyMode.Tunnel)
@@ -100,6 +112,10 @@ namespace Microsoft.Net.Http.Client
             try
             {
                 // TOOD: Cancellation
+                // TODO: If this host resolves to a list of IPs, try them individually and save which one works.
+                // IPv6 addresses are usually listed first and rarely respond, resulting in 5s timeouts per IP until
+                // you get to the right address.
+                // TODO: Round robin DNS.
                 await client.ConnectAsync(_host, _port);
                 return new ApmStreamWrapper(client.GetStream());
             }
@@ -147,6 +163,13 @@ namespace Microsoft.Net.Http.Client
 
         internal void RemoveConnection()
         {
+            _maxConnectionCount.Release();
+        }
+
+        internal void ReturnConnection(HttpConnection connection)
+        {
+            // TODO: queue a background read to detect connection drops
+            _availableConnections.Push(connection);
             _maxConnectionCount.Release();
         }
     }

@@ -128,6 +128,7 @@ namespace Microsoft.Net.Http.Client
                 return new ConnectionGroup(key, proxyMode, MaxConnectionsPerEndpoint);
             });
 
+            // TODO: If GetConnectionAsync or SendAsync fail before returning response headers, try again?
             var connection = await connectionGroup.GetConnectionAsync(request, cancellationToken);
 
             return await connection.SendAsync(request, cancellationToken);
