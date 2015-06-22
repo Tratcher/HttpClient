@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -14,12 +15,15 @@ namespace Microsoft.Net.Http.Client
     {
         private const string CRLF = "\r\n";
 
-        public HttpConnection(BufferedReadStream transport)
+        public HttpConnection(BufferedReadStream transport, ConnectionGroup connectionGroup)
         {
             Transport = transport;
+            Group = connectionGroup;
         }
 
         public BufferedReadStream Transport { get; private set; }
+
+        public ConnectionGroup Group { get; private set; }
 
         public async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -30,7 +34,7 @@ namespace Microsoft.Net.Http.Client
                 byte[] requestBytes = Encoding.ASCII.GetBytes(rawRequest);
                 await Transport.WriteAsync(requestBytes, 0, requestBytes.Length, cancellationToken);
 
-                // TODO: Determin if there's a request body?
+                // TODO: Determine if there's a request body?
                 // Wait for 100-continue?
                 // Send body
 
@@ -38,7 +42,7 @@ namespace Microsoft.Net.Http.Client
                 List<string> responseLines = await ReadResponseLinesAsync(cancellationToken);
                 // Determine response type (Chunked, Content-Length, opaque, none...)
                 // Receive body
-                return CreateResponseMessage(responseLines);
+                return CreateResponseMessage(request, responseLines);
             }
             catch (Exception ex)
             {
@@ -98,7 +102,7 @@ namespace Microsoft.Net.Http.Client
             return lines;
         }
 
-        private HttpResponseMessage CreateResponseMessage(List<string> responseLines)
+        private HttpResponseMessage CreateResponseMessage(HttpRequestMessage request, List<string> responseLines)
         {
             string responseLine = responseLines.First();
             // HTTP/1.1 200 OK
@@ -122,6 +126,7 @@ namespace Microsoft.Net.Http.Client
             {
                 response.ReasonPhrase = responseLineParts[2];
             }
+            response.RequestMessage = request;
             var content = new HttpConnectionResponseContent(this);
             response.Content = content;
 
@@ -140,10 +145,52 @@ namespace Microsoft.Net.Http.Client
                     System.Diagnostics.Debug.Assert(success, "Failed to add response header: " + rawHeader);
                 }
             }
-            // After headers have been set
-            content.ResolveResponseStream(chunked: response.Headers.TransferEncodingChunked.HasValue && response.Headers.TransferEncodingChunked.Value);
+
+            // After headers have been set, work out the content format
+            var groupedConnection = response.Headers.ConnectionClose.HasValue && !response.Headers.ConnectionClose.Value
+                || request.Headers.ConnectionClose.HasValue && !request.Headers.ConnectionClose.Value;
+            var chunked = response.Headers.TransferEncodingChunked.HasValue && response.Headers.TransferEncodingChunked.Value;
+
+            var transport = Transport;
+            if (groupedConnection)
+            {
+                transport = new ConnectionGroupStream(this);
+            }
+            else
+            {
+                Group.RemoveConnection();
+                Group = null;
+            }
+
+            Stream responseStream;
+            if (chunked)
+            {
+                responseStream = new ChunkedReadStream(transport);
+            }
+            else if (content.Headers.ContentLength.HasValue)
+            {
+                responseStream = new ContentLengthReadStream(transport, content.Headers.ContentLength.Value);
+            }
+            else
+            {
+                // Raw, read until end and close
+                responseStream = transport;
+                System.Diagnostics.Debug.Assert(!groupedConnection);
+            }
+
+            content.SetResponseStream(responseStream);
 
             return response;
+        }
+
+        // The request is finished consuming the stream. Drain it (if needed) and return it to the connection group
+        // or close it.
+        public void ReleaseConnection()
+        {
+            // TODO: Drain?
+            // TODO: Close?
+            // TODO: Return to group?
+            Dispose();
         }
 
         public void Dispose()
@@ -155,6 +202,11 @@ namespace Microsoft.Net.Http.Client
         {
             if (disposing)
             {
+                if (Group != null)
+                {
+                    Group.RemoveConnection();
+                    Group = null;
+                }
                 Transport.Dispose();
             }
         }

@@ -1,10 +1,9 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Security;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -12,10 +11,12 @@ namespace Microsoft.Net.Http.Client
 {
     public class ManagedHandler : HttpMessageHandler
     {
+        // TODO: Idle group cleanup
+        private ConcurrentDictionary<ConnectionGroup.Key, ConnectionGroup> _connectionGroups
+            = new ConcurrentDictionary<ConnectionGroup.Key, ConnectionGroup>();
+
         public ManagedHandler()
         {
-            MaxAutomaticRedirects = 20;
-            RedirectMode = RedirectMode.NoDowngrade;
         }
 
         public Uri ProxyAddress
@@ -24,9 +25,11 @@ namespace Microsoft.Net.Http.Client
             get; set;
         }
 
-        public int MaxAutomaticRedirects { get; set; }
+        public int MaxAutomaticRedirects { get; set; } = 20;
 
-        public RedirectMode RedirectMode { get; set; }
+        public RedirectMode RedirectMode { get; set; } = RedirectMode.NoDowngrade;
+
+        public int MaxConnectionsPerEndpoint { get; set; } = 8;
 
         protected async override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -111,32 +114,22 @@ namespace Microsoft.Net.Http.Client
 
             ProcessUrl(request);
             ProcessHostHeader(request);
-            request.Headers.ConnectionClose = true; // TODO: Connection re-use is not supported.
 
             if (request.Method != HttpMethod.Get)
             {
                 throw new NotImplementedException(request.Method.Method); // TODO: POST
             }
 
-            ProxyMode proxyMode = DetermineProxyModeAndAddressLine(request);
-            ApmStream transport = await ConnectAsync(request, cancellationToken);
+            var proxyMode = DetermineProxyModeAndAddressLine(request);
 
-            if (proxyMode == ProxyMode.Tunnel)
+            var connectionGroup = _connectionGroups.GetOrAdd(ConnectionGroup.CreateKey(request), key =>
             {
-                await TunnelThroughProxyAsync(request, transport, cancellationToken);
-            }
+                // TODO: MaxValue connection limit  for localhost/loopback IP
+                return new ConnectionGroup(key, proxyMode, MaxConnectionsPerEndpoint);
+            });
 
-            System.Diagnostics.Debug.Assert(!(proxyMode == ProxyMode.Http && request.IsHttps()));
+            var connection = await connectionGroup.GetConnectionAsync(request, cancellationToken);
 
-            if (request.IsHttps())
-            {
-                SslStream sslStream = new SslStream(transport);
-                await sslStream.AuthenticateAsClientAsync(request.GetHostProperty());
-                transport = new ApmStreamWrapper(sslStream);
-            }
-
-            var bufferedReadStream = new BufferedReadStream(transport);
-            var connection = new HttpConnection(bufferedReadStream);
             return await connection.SendAsync(request, cancellationToken);
         }
 
@@ -249,60 +242,10 @@ namespace Microsoft.Net.Http.Client
                 request.SetConnectionPortProperty(ProxyAddress.Port);
                 return ProxyMode.Http;
             }
-            // Tunneling generates a completely seperate request, don't alter the original, just the connection address.
+            // Tunneling generates a completely separate request, don't alter the original, just the connection address.
             request.SetConnectionHostProperty(ProxyAddress.DnsSafeHost);
             request.SetConnectionPortProperty(ProxyAddress.Port);
             return ProxyMode.Tunnel;
-        }
-
-        private async Task<ApmStream> ConnectAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-        {
-            TcpClient client = new TcpClient();
-            try
-            {
-                await client.ConnectAsync(request.GetConnectionHostProperty(), request.GetConnectionPortProperty().Value);
-                return new ApmStreamWrapper(client.GetStream());
-            }
-            catch (SocketException sox)
-            {
-                ((IDisposable)client).Dispose();
-                throw new HttpRequestException("Request failed", sox);
-            }
-        }
-
-        private async Task TunnelThroughProxyAsync(HttpRequestMessage request, ApmStream transport, CancellationToken cancellationToken)
-        {
-            // Send a Connect request:
-            // CONNECT server.example.com:80 HTTP / 1.1
-            // Host: server.example.com:80
-            var connectReqeuest = new HttpRequestMessage();
-            connectReqeuest.Headers.ProxyAuthorization = request.Headers.ProxyAuthorization;
-            connectReqeuest.Method = new HttpMethod("CONNECT");
-            // TODO: IPv6 hosts
-            string authority = request.GetHostProperty() + ":" + request.GetPortProperty().Value;
-            connectReqeuest.SetAddressLineProperty(authority);
-            connectReqeuest.Headers.Host = authority;
-
-            HttpConnection connection = new HttpConnection(new BufferedReadStream(transport));
-            HttpResponseMessage connectResponse;
-            try
-            {
-                connectResponse = await connection.SendAsync(connectReqeuest, cancellationToken);
-                // TODO:? await connectResponse.Content.LoadIntoBufferAsync(); // Drain any body
-                // There's no danger of accidently consuming real response data because the real request hasn't been sent yet.
-            }
-            catch (Exception ex)
-            {
-                transport.Dispose();
-                throw new HttpRequestException("SSL Tunnel failed to initialize", ex);
-            }
-
-            // Listen for a response. Any 2XX is considered success, anything else is considered a failure.
-            if ((int)connectResponse.StatusCode < 200 || 300 <= (int)connectResponse.StatusCode)
-            {
-                transport.Dispose();
-                throw new HttpRequestException("Failed to negotiate the proxy tunnel: " + connectResponse.ToString());
-            }
         }
     }
 }
