@@ -7,10 +7,6 @@
           "xunit.runner.aspnet": "2.0.0-aspnet-*"
      },
      "frameworks": {
-        "dnx451": {
-            "frameworkAssemblies": { 
-                "System.Runtime": "4.0.0.0"
-            }
-        }
+        "dnx451": { }
      }
 }
